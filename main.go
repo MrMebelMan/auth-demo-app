@@ -3,11 +3,11 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"html/template"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
@@ -19,6 +19,7 @@ import (
 	"github.com/gorilla/sessions"
 	"github.com/joeshaw/envdecode"
 	"github.com/ory/hydra/rand/sequence"
+	"github.com/ory/hydra/sdk/go/hydra/swagger"
 	"golang.org/x/oauth2"
 )
 
@@ -27,10 +28,20 @@ type Config struct {
 	RevokeLoginURL   string   `env:"REVOKE_LOGIN_URL,default=http://blockbook-dev.corp:4445/oauth2/auth/sessions/login/"`
 	RevokeConsentURL string   `env:"REVOKE_CONSENT_URL,default=http://blockbook-dev.corp:4445/oauth2/auth/sessions/consent/"`
 	IntrospectURL    string   `env:"INTROSPECT_URL,default=http://blockbook-dev.corp:4445/oauth2/introspect"`
-	ResourceProxyURL string   `env:"RESOURCE_PROXY_URL,default=http://blockbook-dev.corp:4455/api/store/"`
+	ResourceProxyURL string   `env:"RESOURCE_PROXY_URL,default=http://blockbook-dev.corp:4455/api/"`
 	ListenAddr       string   `env:"LISTEN_ADDR,default=:8080"`
 	CallbackURL      string   `env:"CALLBACK_URL,default=http://localhost:8080/callback"`
-	Scopes           []string `env:"SCOPES",default=openid;offline;id_token;wallet;demo`
+	Scopes           []string `env:"SCOPES,default=openid;offline;id_token;wallet;demo"`
+}
+
+type UserInfo struct {
+	LoggedIn bool
+	Token    *oauth2.Token
+}
+
+type TokenInfo struct {
+	Subject string
+	Email   string
 }
 
 var (
@@ -48,6 +59,7 @@ var store = sessions.NewCookieStore([]byte("session-key"))
 
 func init() {
 	http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	gob.Register(&UserInfo{})
 
 	var c Config
 	err := envdecode.Decode(&c)
@@ -81,8 +93,9 @@ func main() {
 	router.HandleFunc("/login", loginHandler)
 	router.HandleFunc("/callback", callbackHandler)
 	router.HandleFunc("/logout", logoutHandler)
-	router.HandleFunc("/introspect/{type:token|id_token}", introspectHandler)
+	router.HandleFunc("/introspect/{type:token}", introspectHandler)
 	router.HandleFunc("/resource/{path:.*}", resourceHandler)
+	router.HandleFunc("/upload", uploadHandler)
 
 	http.ListenAndServeTLS(config.ListenAddr, "cert/server.crt", "cert/server.key", router)
 }
@@ -93,10 +106,36 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	session, _ := store.New(r, "demo-app-session")
-	if session.Values["token"] != nil {
-		data["isAuthenticated"] = true
+	ui := getUserInfo(session)
+	var ti *TokenInfo
+	if ui != nil {
+		if ui.LoggedIn {
+			token, err := refreshToken(ui.Token)
+			if err != nil {
+				log.Print(err)
+				ui.LoggedIn = false
+				ui.Token = nil
+			} else {
+				ui.Token = token
+			}
+		}
+		session.Values["user-info"] = ui
+
+		log.Printf("Token: %+v", ui.Token)
+
+		data["isAuthenticated"] = ui.LoggedIn
+
+		var err error
+		if ti, err = getOAuth2TokenInfo(ui.Token); err == nil {
+			data["subject"] = ti.Subject
+			data["email"] = ti.Email
+		} else {
+			log.Printf("Error introspecting token: %s", err)
+		}
 	}
 	session.Save(r, w)
+
+	data["objects"] = listObjects(ui.Token, ti, "wallet", "demo")
 
 	t := template.Must(template.New("index").Parse(`<!DOCTYPE html>
 <html>
@@ -112,17 +151,23 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 			{{ if .isAuthenticated }}
 			<li><a href="/logout">Logout</a></li>
 			<li><a href="/introspect/token">Introspect token</a></li>
-			<!--><li><a href="/introspect/id_token">Introspect ID token</a></li><-->
-			{{else}}<li><a href="/login">Login</a></li>{{end}}
+			{{ else }}
+			<li><a href="/login">Login</a></li>
+			{{ end }}
 		</ul>
 	</p>
 	<p>
+		{{ if .isAuthenticated }}
+		Resources available for user <b>{{ .email }}</b>:<br/>
 		<ul>
-			<li><a href="/resource/wallet/abc">Resource: wallet/abc</a></li>
-			<li><a href="/resource/wallet/def">Resource: wallet/def</a></li>
-			<li><a href="/resource/demo/abc">Resource: demo/abc</a></li>
-			<li><a href="/resource/demo/def">Resource: demo/def</a></li>
+			{{ range $name, $path := .objects }}
+			<li><a href="/resource/{{- $path -}}/read">{{- $name -}}</a></li>
+			{{ end }}
 		</ul>
+		<ul>
+			<li><a href="/upload">Upload</a></li>
+		</ul>
+		{{ end }}
 	</p>
 	<p>
 		<ul>
@@ -131,7 +176,10 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 	</p>
 	</body>
 </html>`))
-	t.Execute(w, data)
+	err := t.Execute(w, data)
+	if err != nil {
+		log.Print(err)
+	}
 }
 
 func loginHandler(w http.ResponseWriter, r *http.Request) {
@@ -215,27 +263,34 @@ func callbackHandler(w http.ResponseWriter, r *http.Request) {
 	// 	return
 	// }
 
-	ui, err := getUserInfo(token)
+	session.Values["user-info"] = &UserInfo{
+		LoggedIn: true,
+		Token:    token,
+	}
+
+	session.Save(r, w)
+
+	ui, err := getOIDCUserInfo(token)
 	if err != nil {
 		log.Println("Get user info:", err)
 	}
 
-	session.Values["token"], err = json.Marshal(token)
+	ti, err := getOAuth2TokenInfo(token)
 	if err != nil {
-		log.Println("Error serializing token:", err)
-	}
-	session.Values["id_token"] = rawIDToken
-	session.Save(r, w)
-
-	var claims map[string]interface{}
-	if ui != nil {
-		err = ui.Claims(&claims)
-		if err != nil {
-			log.Print(err)
-		}
+		log.Println("Get token info:", err)
 	}
 
-	fmt.Fprintf(w, `<!DOCTYPE html>
+	data := map[string]interface{}{
+		"code":       code,
+		"scope":      scope,
+		"state":      state,
+		"token":      token,
+		"userInfo":   ui,
+		"tokenInfo":  ti,
+		"rawIDToken": rawIDToken,
+	}
+
+	t := template.Must(template.New("index").Parse(`<!DOCTYPE html>
 <html>
 <head>
 	<title>Auth Demo App</title>
@@ -243,93 +298,149 @@ func callbackHandler(w http.ResponseWriter, r *http.Request) {
 </head>
 <body>
 	<h1>Auth Demo App</h1>
-	<p>Hello %s,<br/>
+	<p>Hello {{ .tokenInfo.Email }},<br/>
 	you've been logged in!</p>
 	<p/>
 	<p><a href="/">Go Back</a></p>
 	<hr/>
-	<p>code: <b>%s</b></p>
-	<p>scope: <b>%s</b></p>
-	<p>state: <b>%s</b></p>
+	<p>code: <b>{{ .code }}</b></p>
+	<p>scope: <b>{{ .scope }}</b></p>
+	<p>state: <b>{{ .state }}</b></p>
 	<p>
 		token:<br/>
 		<ul>
-			<li>access token: <b>%s</b></li>
-			<li>token type: <b>%s</b></li>
-			<li>refresh token: <b>%s</b></li>
-			<li>expiry: <b>%s</b></li>
+			<li>access token: <b>{{ .token.AccessToken }}</b></li>
+			<li>token type: <b>{{ .token.TokenType }}</b></li>
+			<li>refresh token: <b>{{ .token.RefreshToken }}</b></li>
+			<li>expiry: <b>{{ print .token.Expiry }}</b></li>
 		</ul>
 	</p>
 	<p>
-		User info: <br/>
-		<ul>
-			<li>Subject: <b>%s</b></li>
-			<li>Profile: <b>%s</b></li>
-			<li>Email: <b>%s</b></li>
-			<li>EmailVerified: <b>%t</b></li>
-			<li>Claims: <b>%+v</b></li>
-		</ul>
+		<details>
+			<summary>Token introspection</summary>
+			<ul>
+				<li>Subject: <b>{{ .tokenInfo.Subject }}</b></li>
+				<li>Email: <b>{{ .tokenInfo.Email }}</b></li>
+			</ul>
+		</details>
 	</p>
 	<p>
-	<details>
-	<summary>Raw ID token</summary>
-	<p>%s</p>
-	</details>
+		<details>
+			<summary>User info</summary>
+			<ul>
+				<li>Subject: <b>{{ .userInfo.Subject }}</b></li>
+				<li>Profile: <b>{{ .userInfo.Profile }}</b></li>
+				<li>Email: <b>{{ .userInfo.Email }}</b></li>
+				<li>EmailVerified: <b>{{ .userInfo.EmailVerified }}</b></li>
+			</ul>
+		</details>
+	</p>
+	<p>
+		<details>
+			<summary>Raw ID token</summary>
+			<p>{{ .rawIDToken }}</p>
+		</details>
 	</p>
 </body>
-</html>`,
-		ui.Subject,
-		code, scope, state,
-		token.AccessToken, token.TokenType, token.RefreshToken, token.Expiry.String(),
-		ui.Subject, ui.Profile, ui.Email, ui.EmailVerified,
-		claims,
-		rawIDToken)
+</html>`))
+	err = t.Execute(w, data)
+	if err != nil {
+		log.Print(err)
+	}
 }
 
 func logoutHandler(w http.ResponseWriter, r *http.Request) {
 	session, _ := store.New(r, "demo-app-session")
 
 	token, err := loadToken(session)
+	if err == nil {
+		token, err = refreshToken(token)
+	}
 	if err != nil {
 		log.Print(err)
 	}
 
-	delete(session.Values, "token")
-	delete(session.Values, "id_token")
+	delete(session.Values, "user-info")
 	session.Save(r, w)
 
 	if token == nil {
 		http.Redirect(w, r, "/", http.StatusFound)
 	}
 
-	ui, err := getUserInfo(token)
+	ti, err := getOAuth2TokenInfo(token)
 	if err != nil {
 		log.Print(err)
 	} else {
-		revokeConsent(token, ui.Subject)
-		revokeLogin(token, ui.Subject)
+		revokeConsent(token, ti.Subject)
+		revokeLogin(token, ti.Subject)
 	}
 
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
 func loadToken(session *sessions.Session) (token *oauth2.Token, err error) {
-	if b, ok := session.Values["token"]; ok {
-		if b, ok := b.([]byte); ok {
-			err = json.Unmarshal(b, &token)
-		} else {
-			err = fmt.Errorf("Token value has invalid type: %T", b)
-		}
+	if ui := getUserInfo(session); ui != nil {
+		token = ui.Token
+	}
+	if token == nil {
+		err = fmt.Errorf("Cannot load token from session")
 	}
 	return
 }
 
-func getUserInfo(token *oauth2.Token) (userInfo *oidc.UserInfo, err error) {
+func refreshToken(token *oauth2.Token) (*oauth2.Token, error) {
+	ts := oauth2Config.TokenSource(context.Background(), token)
+	ts = oauth2.ReuseTokenSource(token, ts)
+	return ts.Token()
+}
+
+func storeToken(session *sessions.Session, token *oauth2.Token) {
+	if ui := getUserInfo(session); ui != nil {
+		ui.Token = token
+	} else {
+		delete(session.Values, "user-info")
+	}
+}
+
+func getUserInfo(session *sessions.Session) *UserInfo {
+	if ui, ok := session.Values["user-info"]; ok {
+		if ui, ok := ui.(*UserInfo); ok {
+			return ui
+		} else {
+			log.Printf("Invalid type of user-info field: %T", ui)
+		}
+	} else {
+		// log.Println("user-info not set")
+	}
+
+	return nil
+}
+
+func getOIDCUserInfo(token *oauth2.Token) (userInfo *oidc.UserInfo, err error) {
 	withTimeout(500, func(ctx context.Context) {
 		ts := oauth2Config.TokenSource(ctx, token)
 		userInfo, err = oidcProvider.UserInfo(ctx, ts)
 	})
 	return
+}
+
+func getOAuth2TokenInfo(token *oauth2.Token) (*TokenInfo, error) {
+	ti, err := introspectOAuth2Token(token)
+	if err != nil {
+		return nil, err
+	}
+
+	var email string
+	if e, ok := ti.Ext["email"]; ok {
+		if e, ok := e.(string); ok {
+			email = e
+		}
+	}
+
+	return &TokenInfo{
+		Subject: ti.Sub,
+		Email:   email,
+	}, nil
 }
 
 func revokeConsent(token *oauth2.Token, subject string) {
@@ -369,56 +480,56 @@ func revokeLogin(token *oauth2.Token, subject string) {
 }
 
 func introspectHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
 	session, _ := store.New(r, "demo-app-session")
 
 	token, err := loadToken(session)
-	var toIntrospect string
-	if token.Valid() && err == nil {
-		switch vars["type"] {
-		case "token":
-			toIntrospect = token.AccessToken
-		case "id_token":
-			if s, ok := session.Values["id_token"]; ok {
-				if s, ok := s.(string); ok {
-					toIntrospect = s
-				}
-			}
-		}
+	if err == nil {
+		token, err = refreshToken(token)
 	}
-
-	if toIntrospect == "" || !token.Valid() || err != nil {
-		if err != nil {
-			log.Print(err)
-		}
-		delete(session.Values, "token")
-		delete(session.Values, "id_token")
+	if err != nil {
+		log.Print(err)
 		session.Save(r, w)
 		http.Redirect(w, r, "/", http.StatusFound)
 	}
 
+	storeToken(session, token)
 	session.Save(r, w)
 
-	cli := oauth2Config.Client(context.Background(), token)
-
-	form := url.Values{}
-	form.Set("token", toIntrospect)
-	req, err := http.NewRequest("POST", config.IntrospectURL, strings.NewReader(form.Encode()))
+	ti, err := introspectOAuth2Token(token)
+	if err == nil {
+		e := json.NewEncoder(w)
+		err = e.Encode(ti)
+	}
 	if err != nil {
 		log.Print(err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+}
+
+func introspectOAuth2Token(token *oauth2.Token) (*swagger.OAuth2TokenIntrospection, error) {
+	form := url.Values{}
+	form.Set("token", token.AccessToken)
+	req, err := http.NewRequest("POST", config.IntrospectURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 
-	res, err := cli.Do(req)
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Print(err)
-	} else {
-		defer res.Body.Close()
-		b, _ := ioutil.ReadAll(res.Body)
-		fmt.Fprintln(w, string(b))
+		return nil, err
 	}
+	defer res.Body.Close()
+
+	var ti *swagger.OAuth2TokenIntrospection
+	d := json.NewDecoder(res.Body)
+	err = d.Decode(&ti)
+	if err != nil {
+		return nil, err
+	}
+
+	return ti, nil
 }
 
 func withTimeout(ms int, fn func(ctx context.Context)) {
@@ -432,17 +543,18 @@ func resourceHandler(w http.ResponseWriter, r *http.Request) {
 	session, _ := store.New(r, "demo-app-session")
 
 	token, err := loadToken(session)
+	if err == nil {
+		token, err = refreshToken(token)
+	}
 	if err != nil {
 		log.Print(err)
-		delete(session.Values, "token")
-		delete(session.Values, "id_token")
+		delete(session.Values, "user-info")
 		session.Save(r, w)
 		http.Redirect(w, r, "/", http.StatusFound)
 	}
 
+	storeToken(session, token)
 	session.Save(r, w)
-
-	cli := oauth2Config.Client(context.TODO(), token)
 
 	u := config.ResourceProxyURL + vars["path"]
 	req, err := http.NewRequest(r.Method, u, r.Body)
@@ -455,7 +567,9 @@ func resourceHandler(w http.ResponseWriter, r *http.Request) {
 		req.Header[k] = v
 	}
 
-	res, err := cli.Do(req)
+	token.SetAuthHeader(req)
+
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		log.Print(err)
 		w.WriteHeader(http.StatusBadGateway)
@@ -472,7 +586,160 @@ func resourceHandler(w http.ResponseWriter, r *http.Request) {
 		h[k] = v
 	}
 
-	// XXX log & hide http errors
-	// XXX chunked body
-	io.Copy(w, res.Body)
+	_, err = io.Copy(w, res.Body)
+	if err != nil {
+		log.Println("Error writting response: %s: %s", u, err)
+	}
+}
+
+func listObjects(token *oauth2.Token, ti *TokenInfo, buckets ...string) map[string]string {
+	objects := make(map[string]string)
+	for _, bucket := range buckets {
+		u := config.ResourceProxyURL + bucket + "/" + ti.Subject + "/list"
+		req, err := http.NewRequest("GET", u, nil)
+		if err != nil {
+			log.Printf("listObjects: %s", err)
+			continue
+		}
+
+		token.SetAuthHeader(req)
+
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			log.Printf("listObjects: %s", err)
+			continue
+		}
+		defer res.Body.Close()
+
+		if res.StatusCode != http.StatusOK {
+			log.Printf("listObjects: Request failed: %s: %s", u, res.Status)
+			continue
+		}
+
+		d := json.NewDecoder(res.Body)
+		var slice []string
+		if err = d.Decode(&slice); err != nil {
+			log.Printf("listObjects: %s", err)
+			continue
+		}
+
+		for _, s := range slice {
+			name := bucket + ":" + s[len(ti.Subject)+1:]
+			path := bucket + "/" + s
+			objects[name] = path
+		}
+	}
+
+	return objects
+}
+
+func uploadHandler(w http.ResponseWriter, r *http.Request) {
+	session, _ := store.New(r, "demo-app-session")
+	ui := getUserInfo(session)
+	var ti *TokenInfo
+	if ui == nil || !ui.LoggedIn {
+		session.Save(r, w)
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	} else {
+		token, err := refreshToken(ui.Token)
+		if err != nil {
+			log.Print(err)
+			ui.LoggedIn = false
+			ui.Token = nil
+		} else {
+			ui.Token = token
+		}
+		session.Values["user-info"] = ui
+
+		if ui.LoggedIn {
+			if ti, err = getOAuth2TokenInfo(ui.Token); err != nil {
+				log.Printf("Error introspecting token: %s", err)
+			}
+		}
+	}
+	session.Save(r, w)
+
+	if !ui.LoggedIn {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+
+	if r.Method == http.MethodPost {
+		err := r.ParseMultipartForm(32 << 20)
+		if err != nil {
+			log.Printf("Error parsing form: %s", err)
+			http.Error(w, "Error parsing form", http.StatusBadRequest)
+			return
+		}
+
+		file, handler, err := r.FormFile("uploadfile")
+		if err != nil {
+			fmt.Println("Error uploading file: %s", err)
+			http.Error(w, "Error uploading form", http.StatusInternalServerError)
+			return
+		}
+		defer file.Close()
+
+		filename := r.Form.Get("filename")
+		if filename == "" {
+			log.Println("Empty `filename` input")
+			http.Error(w, "Invalid form data", http.StatusBadRequest)
+			return
+		} else {
+			filename = strings.Trim(filename, "/")
+		}
+
+		u := config.ResourceProxyURL + "demo/" + ti.Subject + "/" + filename + "/create"
+		req, err := http.NewRequest(http.MethodPost, u, file)
+		if err != nil {
+			log.Print(err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+		req.Header.Set("Content-Type", handler.Header.Get("Content-Type"))
+
+		ui.Token.SetAuthHeader(req)
+
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			log.Print(err)
+			http.Error(w, "Upload failed", http.StatusBadGateway)
+			return
+		}
+		defer res.Body.Close()
+
+		if res.StatusCode != http.StatusCreated {
+			log.Printf("Request failed: %s: %s", u, res.Status)
+		}
+
+		w.WriteHeader(res.StatusCode)
+		w.Header().Set("Content-Type", res.Header.Get("Content-Type"))
+		_, err = io.Copy(w, res.Body)
+		if err != nil {
+			log.Print(err)
+		}
+
+		return
+	}
+
+	t := template.Must(template.New("upload").Parse(`<!DOCTYPE html>
+<html>
+<head>
+       <title>Upload file</title>
+</head>
+<body>
+<form enctype="multipart/form-data" action="/upload" method="post">
+	Name:
+	<input type="text" name="filename" /><br/>
+    <input type="file" name="uploadfile" /><br/>
+    <input type="submit" value="Upload" />
+</form>
+</body>
+</html>
+`))
+	err := t.Execute(w, nil)
+	if err != nil {
+		log.Print(err)
+	}
 }
