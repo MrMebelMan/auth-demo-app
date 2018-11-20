@@ -132,10 +132,10 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 		} else {
 			log.Printf("Error introspecting token: %s", err)
 		}
+
+		data["objects"] = listObjects(ui.Token, ti, "wallet", "demo")
 	}
 	session.Save(r, w)
-
-	data["objects"] = listObjects(ui.Token, ti, "wallet", "demo")
 
 	t := template.Must(template.New("index").Parse(`<!DOCTYPE html>
 <html>
@@ -363,16 +363,14 @@ func logoutHandler(w http.ResponseWriter, r *http.Request) {
 	delete(session.Values, "user-info")
 	session.Save(r, w)
 
-	if token == nil {
-		http.Redirect(w, r, "/", http.StatusFound)
-	}
-
-	ti, err := getOAuth2TokenInfo(token)
-	if err != nil {
-		log.Print(err)
-	} else {
-		revokeConsent(token, ti.Subject)
-		revokeLogin(token, ti.Subject)
+	if token != nil {
+		ti, err := getOAuth2TokenInfo(token)
+		if err != nil {
+			log.Print(err)
+		} else {
+			revokeConsent(token, ti.Subject)
+			revokeLogin(token, ti.Subject)
+		}
 	}
 
 	http.Redirect(w, r, "/", http.StatusFound)
@@ -488,22 +486,27 @@ func introspectHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		log.Print(err)
+		delete(session.Values, "user-info")
 		session.Save(r, w)
 		http.Redirect(w, r, "/", http.StatusFound)
+		return
 	}
 
 	storeToken(session, token)
 	session.Save(r, w)
 
 	ti, err := introspectOAuth2Token(token)
-	if err == nil {
-		e := json.NewEncoder(w)
-		err = e.Encode(ti)
-	}
 	if err != nil {
 		log.Print(err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	e := json.NewEncoder(w)
+	err = e.Encode(ti)
+	if err != nil {
+		log.Print(err)
 	}
 }
 
@@ -551,6 +554,7 @@ func resourceHandler(w http.ResponseWriter, r *http.Request) {
 		delete(session.Values, "user-info")
 		session.Save(r, w)
 		http.Redirect(w, r, "/", http.StatusFound)
+		return
 	}
 
 	storeToken(session, token)
