@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>Auth Demo App</title>
+	<meta charset="UTF-8">
+</head>
+<body>
+	<h1>Auth Demo App</h1>
+	<p>This is OAuth2 demo application</p>
+	<p>
+		<ul>
+			{{ if .isAuthenticated }}
+			<li><a href="/logout">Logout</a></li>
+			<li><a href="/introspect/token">Introspect token</a></li>
+			{{ else }}
+			<li><a href="/login">Login</a></li>
+			{{ end }}
+		</ul>
+	</p>
+	<p>
+		{{ if .isAuthenticated }}
+		Resources available for user <b>{{ .email }}</b>:<br/>
+		<ul>
+			{{ range $name, $path := .objects }}
+			<li><a href="/resource/{{- $path -}}/read">{{- $name -}}</a></li>
+			{{ end }}
+		</ul>
+		<ul>
+			<li><a href="/upload">Upload</a></li>
+		</ul>
+		{{ end }}
+	</p>
+	<p>
+		<ul>
+			<li><a href="{{ .issuerURL }}oauth2/auth/sessions/login/revoke">Revoke login</a></li>
+		</ul>
+	</p>
+	</body>
+</html>

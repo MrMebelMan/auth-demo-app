@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>Auth Demo App</title>
+	<meta charset="UTF-8">
+</head>
+<body>
+	<h1>Auth Demo App</h1>
+	<p>Hello {{ .tokenInfo.Email }},<br/>
+	you've been logged in!</p>
+	<p/>
+	<p><a href="/">Go Back</a></p>
+	<hr/>
+	<p>code: <b>{{ .code }}</b></p>
+	<p>scope: <b>{{ .scope }}</b></p>
+	<p>state: <b>{{ .state }}</b></p>
+	<p>
+		token:<br/>
+		<ul>
+			<li>access token: <b>{{ .token.AccessToken }}</b></li>
+			<li>token type: <b>{{ .token.TokenType }}</b></li>
+			<li>refresh token: <b>{{ .token.RefreshToken }}</b></li>
+			<li>expiry: <b>{{ print .token.Expiry }}</b></li>
+		</ul>
+	</p>
+	<p>
+		<details>
+			<summary>Token introspection</summary>
+			<ul>
+				<li>Subject: <b>{{ .tokenInfo.Subject }}</b></li>
+				<li>Email: <b>{{ .tokenInfo.Email }}</b></li>
+			</ul>
+		</details>
+	</p>
+	<p>
+		<details>
+			<summary>User info</summary>
+			<ul>
+				<li>Subject: <b>{{ .userInfo.Subject }}</b></li>
+				<li>Profile: <b>{{ .userInfo.Profile }}</b></li>
+				<li>Email: <b>{{ .userInfo.Email }}</b></li>
+				<li>EmailVerified: <b>{{ .userInfo.EmailVerified }}</b></li>
+			</ul>
+		</details>
+	</p>
+	<p>
+		<details>
+			<summary>Raw ID token</summary>
+			<p>{{ .rawIDToken }}</p>
+		</details>
+	</p>
+</body>
+</html>

@@ -137,49 +137,7 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	session.Save(r, w)
 
-	t := template.Must(template.New("index").Parse(`<!DOCTYPE html>
-<html>
-<head>
-	<title>Auth Demo App</title>
-	<meta charset="UTF-8">
-</head>
-<body>
-	<h1>Auth Demo App</h1>
-	<p>This is OAuth2 demo application</p>
-	<p>
-		<ul>
-			{{ if .isAuthenticated }}
-			<li><a href="/logout">Logout</a></li>
-			<li><a href="/introspect/token">Introspect token</a></li>
-			{{ else }}
-			<li><a href="/login">Login</a></li>
-			{{ end }}
-		</ul>
-	</p>
-	<p>
-		{{ if .isAuthenticated }}
-		Resources available for user <b>{{ .email }}</b>:<br/>
-		<ul>
-			{{ range $name, $path := .objects }}
-			<li><a href="/resource/{{- $path -}}/read">{{- $name -}}</a></li>
-			{{ end }}
-		</ul>
-		<ul>
-			<li><a href="/upload">Upload</a></li>
-		</ul>
-		{{ end }}
-	</p>
-	<p>
-		<ul>
-			<li><a href="{{ .issuerURL }}oauth2/auth/sessions/login/revoke">Revoke login</a></li>
-		</ul>
-	</p>
-	</body>
-</html>`))
-	err := t.Execute(w, data)
-	if err != nil {
-		log.Print(err)
-	}
+	executeTemplate(w, "templates/index.html", data)
 }
 
 func loginHandler(w http.ResponseWriter, r *http.Request) {
@@ -290,63 +248,7 @@ func callbackHandler(w http.ResponseWriter, r *http.Request) {
 		"rawIDToken": rawIDToken,
 	}
 
-	t := template.Must(template.New("index").Parse(`<!DOCTYPE html>
-<html>
-<head>
-	<title>Auth Demo App</title>
-	<meta charset="UTF-8">
-</head>
-<body>
-	<h1>Auth Demo App</h1>
-	<p>Hello {{ .tokenInfo.Email }},<br/>
-	you've been logged in!</p>
-	<p/>
-	<p><a href="/">Go Back</a></p>
-	<hr/>
-	<p>code: <b>{{ .code }}</b></p>
-	<p>scope: <b>{{ .scope }}</b></p>
-	<p>state: <b>{{ .state }}</b></p>
-	<p>
-		token:<br/>
-		<ul>
-			<li>access token: <b>{{ .token.AccessToken }}</b></li>
-			<li>token type: <b>{{ .token.TokenType }}</b></li>
-			<li>refresh token: <b>{{ .token.RefreshToken }}</b></li>
-			<li>expiry: <b>{{ print .token.Expiry }}</b></li>
-		</ul>
-	</p>
-	<p>
-		<details>
-			<summary>Token introspection</summary>
-			<ul>
-				<li>Subject: <b>{{ .tokenInfo.Subject }}</b></li>
-				<li>Email: <b>{{ .tokenInfo.Email }}</b></li>
-			</ul>
-		</details>
-	</p>
-	<p>
-		<details>
-			<summary>User info</summary>
-			<ul>
-				<li>Subject: <b>{{ .userInfo.Subject }}</b></li>
-				<li>Profile: <b>{{ .userInfo.Profile }}</b></li>
-				<li>Email: <b>{{ .userInfo.Email }}</b></li>
-				<li>EmailVerified: <b>{{ .userInfo.EmailVerified }}</b></li>
-			</ul>
-		</details>
-	</p>
-	<p>
-		<details>
-			<summary>Raw ID token</summary>
-			<p>{{ .rawIDToken }}</p>
-		</details>
-	</p>
-</body>
-</html>`))
-	err = t.Execute(w, data)
-	if err != nil {
-		log.Print(err)
-	}
+	executeTemplate(w, "templates/callback.html", data)
 }
 
 func logoutHandler(w http.ResponseWriter, r *http.Request) {
@@ -727,23 +629,16 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	t := template.Must(template.New("upload").Parse(`<!DOCTYPE html>
-<html>
-<head>
-       <title>Upload file</title>
-</head>
-<body>
-<form enctype="multipart/form-data" action="/upload" method="post">
-	Name:
-	<input type="text" name="filename" /><br/>
-    <input type="file" name="uploadfile" /><br/>
-    <input type="submit" value="Upload" />
-</form>
-</body>
-</html>
-`))
-	err := t.Execute(w, nil)
+	executeTemplate(w, "templates/upload.html", nil)
+}
+
+func executeTemplate(w http.ResponseWriter, templatePath string, data map[string]interface{}) {
+	t, err := template.ParseFiles(templatePath)
+	if err == nil {
+		err = t.Execute(w, data)
+	}
 	if err != nil {
 		log.Print(err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 	}
 }
