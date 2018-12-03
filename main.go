@@ -154,6 +154,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	loginURL := oauth2Config.AuthCodeURL(state, oauth2.AccessTypeOffline)
 	log.Println(loginURL)
 
+	// XXX store state to redis for later check in callback
 	session, _ := store.New(r, "demo-app-session")
 	session.Values["state"] = state
 	session.Save(r, w)
