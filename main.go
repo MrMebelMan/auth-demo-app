@@ -19,7 +19,6 @@ import (
 	"github.com/gorilla/sessions"
 	"github.com/joeshaw/envdecode"
 	"github.com/ory/hydra/rand/sequence"
-	"github.com/ory/hydra/sdk/go/hydra/swagger"
 	"golang.org/x/oauth2"
 )
 
@@ -43,6 +42,22 @@ type UserInfo struct {
 type TokenInfo struct {
 	Subject string
 	Email   string
+}
+
+type TokenIntrospection struct {
+	Active bool
+	Aud []string
+	ClientId string
+	Exp int
+	Ext map[string]interface{}
+	Iat int
+	Iss string
+	Nbf int
+	ObfuscatedSubject int
+	Scope string
+	Sub string
+	TokenType string
+	Username string
 }
 
 var (
@@ -415,7 +430,7 @@ func introspectHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func introspectOAuth2Token(token *oauth2.Token) (*swagger.OAuth2TokenIntrospection, error) {
+func introspectOAuth2Token(token *oauth2.Token) (*TokenIntrospection, error) {
 	form := url.Values{}
 	form.Set("token", token.AccessToken)
 	req, err := http.NewRequest("POST", config.IntrospectURL, strings.NewReader(form.Encode()))
@@ -430,7 +445,7 @@ func introspectOAuth2Token(token *oauth2.Token) (*swagger.OAuth2TokenIntrospecti
 	}
 	defer res.Body.Close()
 
-	var ti *swagger.OAuth2TokenIntrospection
+	var ti *TokenIntrospection
 	d := json.NewDecoder(res.Body)
 	err = d.Decode(&ti)
 	if err != nil {
