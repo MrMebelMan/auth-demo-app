@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/rand"
+	"math/big"
 	"encoding/gob"
 	"encoding/json"
 	"fmt"
@@ -18,7 +20,6 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/gorilla/sessions"
 	"github.com/joeshaw/envdecode"
-	"github.com/ory/hydra/rand/sequence"
 	"golang.org/x/oauth2"
 )
 
@@ -157,8 +158,29 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 	executeTemplate(w, "templates/index.html", data)
 }
 
+// GenerateRandomASCIIString returns a securely generated random ASCII string.
+// It reads random numbers from crypto/rand and searches for printable characters.
+// Adapted from: https://gist.github.com/denisbrodbeck/635a644089868a51eccd6ae22b2eb800
+func GenerateRandomLowercaseString(length int) (string, error) {
+	result := ""
+	lower_bound, upper_bound := int64('a'), int64('z')
+	for {
+		if len(result) >= length {
+			return result, nil
+		}
+		num, err := rand.Int(rand.Reader, big.NewInt(upper_bound + 1))
+		if err != nil {
+			return "", err
+		}
+		n := num.Int64()
+		if n >= lower_bound && n <= upper_bound {
+			result += string(n)
+		}
+	}
+}
+
 func loginHandler(w http.ResponseWriter, r *http.Request) {
-	seq, err := sequence.RuneSequence(24, sequence.AlphaLower)
+	seq, err := GenerateRandomLowercaseString(24)
 	if err != nil {
 		log.Printf("Could not generate random state: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
