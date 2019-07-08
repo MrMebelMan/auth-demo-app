@@ -24,12 +24,12 @@ import (
 )
 
 type Config struct {
-	IssuerURL        string   `env:"HYDRA_PUBLIC_URL,default=http://blockbook-dev.corp:4444/"`
-	RevokeLoginURL   string   `env:"REVOKE_LOGIN_URL,default=http://blockbook-dev.corp:4445/oauth2/auth/sessions/login/"`
-	RevokeConsentURL string   `env:"REVOKE_CONSENT_URL,default=http://blockbook-dev.corp:4445/oauth2/auth/sessions/consent/"`
-	IntrospectURL    string   `env:"INTROSPECT_URL,default=http://blockbook-dev.corp:4445/oauth2/introspect"`
-	ResourceProxyURL string   `env:"RESOURCE_PROXY_URL,default=http://blockbook-dev.corp:4455/api/"`
-	RegisterURL      string   `env:"REGISTER_URL,default=https://blockbook-dev.corp:9000/register"`
+	IssuerURL        string   `env:"HYDRA_PUBLIC_URL,default=http://blockbook-dev.corp.sldev.cz:4444/"`
+	RevokeLoginURL   string   `env:"REVOKE_LOGIN_URL,default=http://blockbook-dev.corp.sldev.cz:4445/oauth2/auth/sessions/login/"`
+	RevokeConsentURL string   `env:"REVOKE_CONSENT_URL,default=http://blockbook-dev.corp.sldev.cz:4445/oauth2/auth/sessions/consent/"`
+	IntrospectURL    string   `env:"INTROSPECT_URL,default=http://blockbook-dev.corp.sldev.cz:4445/oauth2/introspect"`
+	ResourceProxyURL string   `env:"RESOURCE_PROXY_URL,default=http://blockbook-dev.corp.sldev.cz:4455/api/"`
+	RegisterURL      string   `env:"REGISTER_URL,default=https://blockbook-dev.corp.sldev.cz:9000/register"`
 	ListenAddr       string   `env:"LISTEN_ADDR,default=:8080"`
 	CallbackURL      string   `env:"CALLBACK_URL,default=http://localhost:8080/callback"`
 	Scopes           []string `env:"SCOPES,default=openid;offline;id_token;wallet;demo"`
